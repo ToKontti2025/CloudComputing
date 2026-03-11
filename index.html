@@ -1,63 +1,332 @@
-<!DOCTYPE html>
-<html lang="en">
+<!doctype html>
+<html lang="fi">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Module 3 - GitHub Pages</title>
-    <style>
-        body {
-            font-family: Arial, sans-serif;
-            margin: 0;
-            padding: 0;
-            background: #f4f6f8;
-            color: #222;
-        }
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>TM • Always on • Sticky state</title>
 
-        .container {
-            max-width: 800px;
-            margin: 60px auto;
-            background: white;
-            padding: 30px;
-            border-radius: 12px;
-            box-shadow: 0 4px 14px rgba(0,0,0,0.1);
-        }
+<style>
+  :root{--bg:#1e1e1e;--panel:#111213;--panel2:#151617;--text:#fff;--muted:#a9afb7;--accent:#00ff80;--off:#33383f;--radius:14px;--shadow:0 10px 24px rgba(0,0,0,.36);}
+  *{box-sizing:border-box}
+  body{margin:0;min-height:100vh;background:var(--bg);color:var(--text);font-family:system-ui,Segoe UI,Arial,sans-serif}
+  .wrap{max-width:900px;margin:20px auto;padding:0 16px}
+  .card{background:linear-gradient(180deg,var(--panel),var(--panel2));border:1px solid #23272f;border-radius:var(--radius);box-shadow:var(--shadow);padding:16px;margin:14px 0}
+  .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+  .pill{padding:6px 10px;border-radius:999px;font-size:12px;border:1px solid #2a3038;background:#1b1f25;color:var(--muted)}
+  .ok{background:#11251b;color:#a9f9cc;border-color:#1f5d3f}
+  .stop{background:#2a1416;color:#ffb4b4;border-color:#5c2323}
+  .warn{background:#2a2414;color:#ffe7a1;border-color:#5c5123}
+  video{width:100%;max-width:520px;border-radius:12px;border:1px solid #23272f;background:#000;display:block;margin-top:12px}
+  pre{white-space:pre-wrap;color:var(--muted);margin:10px 0 0}
+</style>
 
-        h1 {
-            margin-top: 0;
-            color: #1f4e79;
-        }
-
-        p {
-            line-height: 1.6;
-        }
-
-        .box {
-            margin-top: 20px;
-            padding: 15px;
-            background: #eef4ff;
-            border-left: 5px solid #1f4e79;
-            border-radius: 6px;
-        }
-    </style>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@teachablemachine/image@0.8/dist/teachablemachine-image.min.js"></script>
 </head>
+
 <body>
-    <div class="container">
-        <h1>Module 3 - Cloud-based Frontend Deployment</h1>
+<div class="wrap">
+  <h1>TM • Always on • Sticky state</h1>
 
-        <p>
-            This page is created for Part 1 of the Module 3 assignment.
-            The objective is to deploy a static HTML file using GitHub Pages.
-        </p>
-
-        <div class="box">
-            <p><strong>Student:</strong> Tommi Konttila</p>
-            <p><strong>Course:</strong> Cloud Computing</p>
-            <p><strong>Task:</strong> Deploying static file with GitHub Pages</p>
-        </div>
-
-        <p>
-            This website is hosted with GitHub Pages as required in the assignment.
-        </p>
+  <div class="card" id="mainCard">
+    <div class="row">
+      <span class="pill" id="tm">TM: idle</span>
+      <span class="pill stop" id="state">State: off</span>
+      <span class="pill" id="info">Info: boot</span>
     </div>
+    <pre id="dbg"></pre>
+  </div>
+</div>
+
+<script>
+  // model files
+  const TM_MODEL_URL = "./tm/model.json";
+  const TM_META_URL  = "./tm/metadata.json";
+
+  // demo = no network, shelly = send relay calls
+  const CONTROL_MODE = "demo";          // "shelly" or "demo"
+  // shelly ip
+  const PRESSU_IP = "10.10.1.104";
+
+  // min confidence for accept
+  const MIN_CONF = 0.92;
+  // frames needed before commit
+  const STREAK_FRAMES = 8;
+  // frames to ignore after commit
+  const COOLDOWN_FRAMES = 18;
+
+  // localStorage key
+  const STORAGE_KEY = "pressuhalli_state"; // "on" / "off"
+
+  // ui refs
+  const tmEl    = document.getElementById("tm");
+  const stateEl = document.getElementById("state");
+  const infoEl  = document.getElementById("info");
+  const dbgEl   = document.getElementById("dbg");
+  const mainCard = document.getElementById("mainCard");
+
+  // tm model instance
+  let tmModel = null;
+
+  // camera stuff
+  let stream = null;
+  let video = null;
+
+  // loop state
+  let rafId = null;
+  let running = false;
+
+  // last committed state
+  let currentState = "off";
+
+  // candidate tracking
+  let candidate = null;
+  let streak = 0;
+  let cooldown = 0;
+
+  // update tm pill
+  function setTm(s){ tmEl.textContent = "TM: " + s; }
+
+  // update info pill
+  function setInfo(s, cls){
+    infoEl.textContent = "Info: " + s;
+    infoEl.classList.remove("ok","stop","warn");
+    if(cls) infoEl.classList.add(cls);
+  }
+
+  // update state pill
+  function setState(next){
+    currentState = next;
+    stateEl.textContent = "State: " + next;
+    stateEl.classList.remove("ok","stop");
+    if(next === "on") stateEl.classList.add("ok");
+    if(next === "off") stateEl.classList.add("stop");
+  }
+
+  // print debug lines
+  function writeDebug(){
+    const lines = [];
+    lines.push("secureContext: " + window.isSecureContext);
+    lines.push("getUserMedia: " + (!!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia)));
+    lines.push("mode: " + CONTROL_MODE);
+    lines.push("pressu ip: " + PRESSU_IP);
+    lines.push("ua: " + navigator.userAgent);
+    dbgEl.textContent = lines.join("\n");
+  }
+
+  // read last state
+  function readStoredState(){
+    const v = (localStorage.getItem(STORAGE_KEY) || "").toLowerCase();
+    if(v === "on" || v === "off") return v;
+    return "off";
+  }
+
+  // save last state
+  function saveState(next){
+    if(next === "on" || next === "off") localStorage.setItem(STORAGE_KEY, next);
+  }
+
+  // load tm model once
+  async function loadModel(){
+    if(tmModel) return tmModel;
+    if(typeof tmImage === "undefined") throw new Error("tm libs missing");
+    setTm("loading...");
+    tmModel = await tmImage.load(TM_MODEL_URL, TM_META_URL);
+    setTm("model ok");
+    return tmModel;
+  }
+
+  // create video once
+  function ensureVideo(){
+    if(video) return video;
+    video = document.createElement("video");
+    video.setAttribute("playsinline", "");
+    video.muted = true;
+    video.autoplay = true;
+    mainCard.appendChild(video);
+    return video;
+  }
+
+  // build shelly url (gen1)
+  function shellyUrl(ip, action){
+    return `http://${ip}/relay/0?turn=${action}`;
+  }
+
+  // send shelly command
+  async function sendShelly(ip, action){
+    const url = shellyUrl(ip, action);
+    try{
+      await fetch(url, { mode: "no-cors", cache: "no-store" });
+      return true;
+    }catch(e){
+      try{
+        const img = new Image();
+        img.onload = img.onerror = ()=>{};
+        img.src = url + (url.includes("?") ? "&" : "?") + "_t=" + Date.now();
+        return true;
+      }catch(e2){
+        return false;
+      }
+    }
+  }
+
+  // apply state + store + optional send
+  async function enforceState(next){
+    setState(next);
+    saveState(next);
+
+    if(CONTROL_MODE !== "shelly"){
+      setInfo("demo enforced " + next, next === "on" ? "ok" : "stop");
+      return;
+    }
+
+    const action = (next === "on") ? "on" : "off";
+    const ok = await sendShelly(PRESSU_IP, action);
+
+    if(ok) setInfo("enforced " + action, next === "on" ? "ok" : "stop");
+    else setInfo("enforce failed", "warn");
+  }
+
+  // map tm label -> state
+  function mapLabel(raw){
+    const r = (raw || "").toLowerCase();
+
+    if(r === "on") return "on";
+    if(r === "of") return "off";
+    if(r === "none") return "off";
+    if(r === "off") return "off";
+
+    return null;
+  }
+
+  // pick best prediction
+  function bestPred(preds){
+    let best = preds[0];
+    for(const p of preds){
+      if(p.probability > best.probability) best = p;
+    }
+    return best;
+  }
+
+  // reset candidate streak
+  function resetCandidate(){
+    candidate = null;
+    streak = 0;
+  }
+
+  // commit new state (sticky)
+  async function commit(next){
+    if(next === currentState){
+      setInfo("stable " + next, next === "on" ? "ok" : "stop");
+      return;
+    }
+
+    await enforceState(next);
+
+    cooldown = COOLDOWN_FRAMES;
+    resetCandidate();
+  }
+
+  // start camera
+  async function startCamera(){
+    if(!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia)){
+      throw new Error("camera api missing");
+    }
+
+    const v = ensureVideo();
+    setTm("starting camera...");
+
+    try{
+      stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" }, audio: false });
+    }catch(e){
+      stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+    }
+
+    v.srcObject = stream;
+    await v.play();
+    setTm("running");
+  }
+
+  // main loop
+  async function loop(){
+    if(!running) return;
+
+    if(cooldown > 0) cooldown--;
+
+    const preds = await tmModel.predict(video);
+    const best = bestPred(preds);
+
+    const raw = best.className;
+    const conf = best.probability;
+    const mapped = mapLabel(raw);
+
+    setTm(`${raw} ${conf.toFixed(2)} → ${mapped ?? "-"}`);
+
+    if(!mapped || conf < MIN_CONF){
+      resetCandidate();
+      setInfo("ignore", "warn");
+      rafId = requestAnimationFrame(loop);
+      return;
+    }
+
+    if(cooldown > 0){
+      resetCandidate();
+      setInfo("cooldown", "warn");
+      rafId = requestAnimationFrame(loop);
+      return;
+    }
+
+    if(mapped === currentState){
+      resetCandidate();
+      setInfo("stable " + currentState, mapped === "on" ? "ok" : "stop");
+      rafId = requestAnimationFrame(loop);
+      return;
+    }
+
+    if(candidate !== mapped){
+      candidate = mapped;
+      streak = 1;
+      setInfo("candidate " + candidate + " (1/" + STREAK_FRAMES + ")", "warn");
+      rafId = requestAnimationFrame(loop);
+      return;
+    }
+
+    streak++;
+    setInfo("candidate " + candidate + " (" + streak + "/" + STREAK_FRAMES + ")", "warn");
+
+    if(streak >= STREAK_FRAMES){
+      await commit(candidate);
+    }
+
+    rafId = requestAnimationFrame(loop);
+  }
+
+  // boot flow
+  async function boot(){
+    writeDebug();
+
+    const stored = readStoredState();
+    setState(stored);
+    setInfo("loaded " + stored, stored === "on" ? "ok" : "stop");
+
+    await enforceState(stored);
+
+    await loadModel();
+    await startCamera();
+
+    running = true;
+    resetCandidate();
+    cooldown = 0;
+
+    loop();
+  }
+
+  // start app
+  boot().catch(err=>{
+    setTm("error: " + err.message);
+    setInfo("boot failed", "warn");
+    writeDebug();
+  });
+</script>
 </body>
 </html>
