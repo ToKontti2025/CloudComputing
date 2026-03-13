@@ -54,3 +54,7 @@ CloudComputing/
     ├── metadata.json
     ├── model.json
     └── weights.bin
+
+Use of AI
+
+Artificial intelligence (OpenAI ChatGPT, GPT-5 model) was used in this project to support learning and debugging. In addition, AI was used to improve the clarity of the text and documentation so that the project structure and explanations would be as understandable as possible. The use of AI was limited to supporting learning and the author’s own work, not to automatically completing the assignment.
